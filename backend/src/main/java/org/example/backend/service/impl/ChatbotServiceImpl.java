@@ -84,6 +84,8 @@ public class ChatbotServiceImpl implements ChatbotService {
     private static final int MAX_GOALS = 20;
     private static final int RECENT_CONTRIBUTIONS = 3;
     private static final int MAX_USER_TEXT = 80;
+    private static final int MAX_CHAT_MESSAGE_LENGTH = 5000;
+    private static final int MAX_HISTORY_TOTAL_LENGTH = 10000;
 
     private final FamilyAccessChecker familyAccessChecker;
     private final UserRepository userRepository;
@@ -143,9 +145,9 @@ public class ChatbotServiceImpl implements ChatbotService {
                     "Nội dung tin nhắn không được để trống");
         }
 
-        if (sanitizedMessage.length() > 2000) {
+        if (sanitizedMessage.length() > MAX_CHAT_MESSAGE_LENGTH) {
             throw new BadRequestException(
-                    "Nội dung tin nhắn tối đa 2000 ký tự");
+                    "Nội dung tin nhắn tối đa 5000 ký tự");
         }
 
         LocalDate today = LocalDate.now(ZONE);
@@ -304,15 +306,50 @@ public class ChatbotServiceImpl implements ChatbotService {
      * Ghép lịch sử hội thoại do giao diện gửi lên với câu hỏi hiện tại.
      * Chỉ dùng làm ngữ cảnh cho bộ dự phòng; không xem nội dung này là dữ liệu FinHome.
      */
-    private String buildFallbackInput(ChatMessageRequest request, String currentMessage) {
-        StringBuilder input = new StringBuilder();
-        if (request.getConversationHistory() != null) {
-            request.getConversationHistory().stream()
-                    .filter(StringUtils::hasText)
-                    .skip(Math.max(0, request.getConversationHistory().size() - 12))
-                    .forEach(item -> input.append(item).append("\\n"));
+    private String buildFallbackInput(
+            ChatMessageRequest request,
+            String currentMessage) {
+
+        List<String> selectedHistory = new ArrayList<>();
+        int totalLength = 0;
+
+        List<String> history = request.getConversationHistory();
+
+        if (history != null) {
+            int start = Math.max(0, history.size() - 12);
+
+            // Ưu tiên các tin nhắn mới nhất.
+            for (int i = history.size() - 1; i >= start; i--) {
+                String item = history.get(i);
+
+                if (!StringUtils.hasText(item)) {
+                    continue;
+                }
+
+                // Phòng vệ ở backend, không phụ thuộc hoàn toàn frontend.
+                if (item.length() > 2000) {
+                    item = item.substring(0, 2000);
+                }
+
+                if (totalLength + item.length() > MAX_HISTORY_TOTAL_LENGTH) {
+                    break;
+                }
+
+                selectedHistory.add(item);
+                totalLength += item.length();
+            }
         }
+
+        java.util.Collections.reverse(selectedHistory);
+
+        StringBuilder input = new StringBuilder();
+
+        selectedHistory.forEach(item ->
+                input.append(item).append("\n")
+        );
+
         input.append("Người dùng: ").append(currentMessage);
+
         return input.toString();
     }
 
