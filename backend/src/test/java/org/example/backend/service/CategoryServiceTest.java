@@ -1,0 +1,144 @@
+package org.example.backend.service;
+
+import org.example.backend.exception.BadRequestException;
+import org.example.backend.exception.ConflictException;
+import org.example.backend.model.dto.request.CreateCategoryRequest;
+import org.example.backend.model.dto.request.UpdateCategoryRequest;
+import org.example.backend.model.dto.response.CategoryResponse;
+import org.example.backend.model.entity.Category;
+import org.example.backend.model.entity.User;
+import org.example.backend.model.enums.CategoryType;
+import org.example.backend.model.enums.SystemRole;
+import org.example.backend.repository.BudgetRepository;
+import org.example.backend.repository.CategoryRepository;
+import org.example.backend.repository.TransactionRepository;
+import org.example.backend.service.impl.CategoryServiceImpl;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.*;
+import org.springframework.data.jpa.domain.Specification;
+
+import java.util.List;
+import java.util.Optional;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class CategoryServiceTest {
+
+    @Mock
+    private CategoryRepository categoryRepository;
+
+    @Mock
+    private BudgetRepository budgetRepository;
+
+    @Mock
+    private TransactionRepository transactionRepository;
+
+    @Mock
+    private FamilyAccessChecker familyAccessChecker;
+
+    @InjectMocks
+    private CategoryServiceImpl categoryService;
+
+    private User currentUser;
+    private Category category;
+
+    @BeforeEach
+    void setUp() {
+        currentUser = User.builder()
+                .id(1L)
+                .email("admin@example.com")
+                .username("admin")
+                .role(SystemRole.ADMIN)
+                .enabled(true)
+                .build();
+
+        category = Category.builder()
+                .id(10L)
+                .name("Ăn uống")
+                .type(CategoryType.EXPENSE)
+                .family(null)
+                .active(true)
+                .build();
+    }
+
+    @Test
+    @DisplayName("createSystemCategory - thành công")
+    void createSystemCategory_success() {
+        CreateCategoryRequest request = CreateCategoryRequest.builder()
+                .name("Ăn uống")
+                .type(CategoryType.EXPENSE)
+                .build();
+
+        when(categoryRepository.existsByFamilyIsNullAndNameIgnoreCaseAndType("Ăn uống", CategoryType.EXPENSE))
+                .thenReturn(false);
+        when(categoryRepository.save(any(Category.class))).thenReturn(category);
+
+        CategoryResponse response = categoryService.createSystemCategory(currentUser, request);
+
+        assertNotNull(response);
+        assertEquals(10L, response.getId());
+        assertEquals("Ăn uống", response.getName());
+        assertEquals(CategoryType.EXPENSE, response.getType());
+        verify(categoryRepository).save(any(Category.class));
+    }
+
+    @Test
+    @DisplayName("createSystemCategory - trùng tên sẽ ném ConflictException")
+    void createSystemCategory_conflict() {
+        CreateCategoryRequest request = CreateCategoryRequest.builder()
+                .name("Ăn uống")
+                .type(CategoryType.EXPENSE)
+                .build();
+
+        when(categoryRepository.existsByFamilyIsNullAndNameIgnoreCaseAndType("Ăn uống", CategoryType.EXPENSE))
+                .thenReturn(true);
+
+        assertThrows(ConflictException.class, () -> categoryService.createSystemCategory(currentUser, request));
+        verify(categoryRepository, never()).save(any(Category.class));
+    }
+
+    @Test
+    @DisplayName("getCategories - trả về page danh mục")
+    @SuppressWarnings("unchecked")
+    void getCategories_success() {
+            PageRequest pageable = PageRequest.of(0, 10);
+            Page<Category> page = new PageImpl<>(List.of(category), pageable, 1);
+
+            // Service tự dựng Pageable mới (giới hạn size, thêm id làm tiêu chí phụ) nên không so khớp đúng đối tượng cũ.
+            when(categoryRepository.findAll(any(Specification.class), any(Pageable.class)))
+                    .thenReturn(page);
+
+            Page<CategoryResponse> result =
+                    categoryService.getCategories(currentUser, null, "", CategoryType.EXPENSE, false, pageable);
+
+            assertNotNull(result);
+            assertEquals(1, result.getTotalElements());
+            assertEquals("Ăn uống", result.getContent().get(0).getName());
+
+            ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+            verify(categoryRepository).findAll(any(Specification.class), captor.capture());
+            assertTrue(captor.getValue().getPageSize() <= 50);
+            assertNotNull(captor.getValue().getSort().getOrderFor("id"));
+        }
+
+    @Test
+    @DisplayName("getCategories - sort theo trường không cho phép thì 400")
+    void getCategories_invalidSort() {
+        PageRequest pageable = PageRequest.of(0, 10, Sort.by("password"));
+
+        assertThrows(BadRequestException.class, () ->
+                categoryService.getCategories(currentUser, null, "", null, false, pageable));
+    }
+    }

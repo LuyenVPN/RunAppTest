@@ -1,0 +1,99 @@
+package org.example.backend.security.jwt;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.backend.model.entity.User;
+import org.example.backend.security.principal.CustomUserDetails;
+import org.example.backend.security.principal.CustomUserDetailsService;
+import org.springframework.lang.NonNull;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtService jwtService;
+    private final CustomUserDetailsService customUserDetailsService;
+
+    @Override
+    protected void doFilterInternal(
+            @NonNull HttpServletRequest request,
+            @NonNull HttpServletResponse response,
+            @NonNull FilterChain filterChain) throws ServletException, IOException {
+
+        final String token = parseJwt(request);
+
+        if (token != null && jwtService.validateToken(token)) {
+            try {
+                String username = jwtService.extractUsername(token);
+                Long tokenUserId = jwtService.extractUserId(token);
+
+                if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+                    CustomUserDetails userDetails = (CustomUserDetails) customUserDetailsService.loadUserByUsername(username);
+                    User currentUser = userDetails.getUser();
+
+                    // Token tìm người dùng theo username, mà username có thể được người khác dùng lại sau khi
+                    // chủ cũ đổi tên hoặc xóa tài khoản. Phải đúng id trong token thì mới là cùng một người.
+                    if (tokenUserId == null || !tokenUserId.equals(currentUser.getId())) {
+                        log.warn("Token cấp cho user ID {} nhưng username '{}' hiện thuộc user ID {}, từ chối xác thực",
+                                tokenUserId, username, currentUser.getId());
+                    } else if (isIssuedBeforeRevocation(token, currentUser)) {
+                        log.warn("Token của user ID {} được cấp trước thời điểm thu hồi, từ chối xác thực",
+                                currentUser.getId());
+                    } else if (currentUser.isEnabled()) {
+                        UsernamePasswordAuthenticationToken authentication =
+                                new UsernamePasswordAuthenticationToken(currentUser, null, currentUser.getAuthorities());
+                        authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                        SecurityContextHolder.getContext().setAuthentication(authentication);
+                    } else {
+                        log.warn("Tài khoản '{}' đã bị vô hiệu hóa khi cố gắng xác thực", username);
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Không thể thiết lập xác thực người dùng trong SecurityContext: {}", e.getMessage());
+            }
+        }
+
+        filterChain.doFilter(request, response);
+    }
+
+    /**
+     * Token bị thu hồi nếu được cấp trước (hoặc cùng giây với) mốc tokensValidFrom của người dùng.
+     * iat của JWT chỉ có độ chính xác đến giây nên mốc cũng được cắt về giây, và so bằng "không sau"
+     * để token cấp trong cùng giây với lúc khóa vẫn bị tính là cũ.
+     * Không đọc được iat thì coi như bị thu hồi (từ chối cho an toàn).
+     */
+    private boolean isIssuedBeforeRevocation(String token, User user) {
+        Instant validFrom = user.getTokensValidFrom();
+        if (validFrom == null) {
+            return false;
+        }
+        Instant issuedAt = jwtService.extractIssuedAt(token);
+        if (issuedAt == null) {
+            return true;
+        }
+        return !issuedAt.isAfter(validFrom.truncatedTo(ChronoUnit.SECONDS));
+    }
+
+    private String parseJwt(HttpServletRequest request) {
+        String headerAuth = request.getHeader("Authorization");
+        if (StringUtils.hasText(headerAuth) && headerAuth.startsWith("Bearer ")) {
+            return headerAuth.substring(7);
+        }
+        return null;
+    }
+}
